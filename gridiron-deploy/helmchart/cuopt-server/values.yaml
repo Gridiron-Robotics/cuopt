@@ -1,0 +1,128 @@
+# Default values for the cuopt-server chart.
+# This is a YAML-formatted file. Values here feed the templates/ manifests.
+#
+# The cuOpt server is a GPU-only workload: it MUST be scheduled onto a node that
+# advertises "nvidia.com/gpu" (NVIDIA device plugin / GPU Operator installed).
+
+# Number of solver replicas. cuOpt is stateless per-request, so it can be scaled
+# horizontally, but every replica consumes a full GPU (see resources below).
+replicaCount: 1
+
+image:
+  # Docker Hub image (NOT nvcr.io). See https://hub.docker.com/r/nvidia/cuopt/tags
+  repository: nvidia/cuopt
+  # Pinned to an exact, immutable tag — never "latest" or a floating tag.
+  tag: "26.8.0-cuda12.9-py3.12"
+  pullPolicy: IfNotPresent
+
+# Optional image pull secrets (e.g. for a mirrored/private registry). Empty by default.
+imagePullSecrets: []
+
+# Overrides for the generated resource names.
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Create a dedicated ServiceAccount for the solver pods.
+  create: true
+  # Annotations to add to the service account (e.g. cloud workload identity).
+  annotations: {}
+  # Name to use. If empty and create=true, a name is derived from the fullname.
+  name: ""
+
+# Extra annotations for the pod (e.g. Prometheus scrape hints).
+podAnnotations: {}
+
+# Pod- and container-level security contexts. Left empty; tighten per your policy.
+podSecurityContext: {}
+  # fsGroup: 2000
+securityContext: {}
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  # ClusterIP keeps the solver internal to the cluster. The estate services reach
+  # it in-cluster at http://<release>-cuopt-server:5000. Use port-forward for local access.
+  type: ClusterIP
+  # Service port and the container's listening port. cuOpt listens on 5000.
+  port: 5000
+  targetPort: 5000
+
+ingress:
+  # Disabled by default — the solver is an internal microservice. Enable only if you
+  # deliberately want to expose it (front it with auth; cuOpt has no built-in auth).
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: cuopt-server.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: cuopt-server-tls
+  #    hosts:
+  #      - cuopt-server.local
+
+# GPU resource reservation. cuOpt requires exactly one GPU per pod; request and
+# limit are both set to nvidia.com/gpu: 1 (GPUs are non-overcommittable in k8s).
+resources:
+  requests:
+    nvidia.com/gpu: 1
+  limits:
+    nvidia.com/gpu: 1
+
+# Horizontal Pod Autoscaler. Disabled by default — each replica pins a whole GPU,
+# so scale deliberately against real GPU capacity, not CPU utilisation.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# Node scheduling controls. Empty by default; the GPU request alone will steer the
+# pod onto a GPU node when the NVIDIA device plugin is installed.
+
+# Constrain to specific GPU nodes, e.g. { accelerator: nvidia-tesla-t4 }.
+nodeSelector: {}
+
+# Pod affinity/anti-affinity rules.
+affinity: {}
+
+# Tolerations for tainted GPU nodes. Many GPU node pools carry a taint like
+# nvidia.com/gpu=present:NoSchedule — uncomment to tolerate it:
+tolerations: []
+  # - key: "nvidia.com/gpu"
+  #   operator: "Exists"
+  #   effect: "NoSchedule"
+
+# GPU runtime configuration.
+gpu:
+  # On clusters that schedule GPUs via a RuntimeClass (instead of the default
+  # container runtime), pin the NVIDIA runtime class here, e.g.:
+  #   runtimeClassName: nvidia
+  # Empty string means "don't set runtimeClassName" (rely on the default runtime).
+  runtimeClassName: ""
+
+# Container entrypoint. Launches the cuOpt service on port 5000. Keep in sync with
+# service.targetPort. This is the ground-truth command from the upstream image.
+command:
+  - python
+  - -m
+  - cuopt_server.cuopt_service
+  - -p
+  - "5000"
+
+# Extra environment variables for the solver container (list of name/value maps).
+env: []
+
+# Optional persistent storage. cuOpt is stateless per request, so this is off by
+# default; enable only if a workload needs a scratch volume mounted at /data.
+persistence:
+  enabled: false
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  # storageClass: ""

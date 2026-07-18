@@ -1,0 +1,46 @@
+# Live NVIDIA cuOpt solver (self-hosted "cuopt-server") for local development.
+#
+# This stands up the SAME solver container that the estate's services point at:
+#   - simulation service:  CUOPT_URL=http://localhost:5000
+#   - floorplans pipeline:  RL_CUOPT_REST_URL=http://localhost:5000 (RL_CUOPT_BACKEND=rest)
+#
+# It exposes the async cuOpt REST contract on port 5000:
+#   POST http://localhost:5000/cuopt/request   -> returns reqId
+#   GET  http://localhost:5000/cuopt/solution/{reqId}  -> poll for the solution
+#   GET  http://localhost:5000/cuopt/health    -> health check
+#
+# Requirements: an NVIDIA GPU + nvidia-container-toolkit installed on the host.
+# Run with:  docker compose -f docker-compose.cuopt.yml up -d
+#
+# The GPU reservation idiom below mirrors docker-compose.gpu-dev.yml in this repo.
+
+services:
+  cuopt:
+    # Docker Hub image (NOT nvcr.io), pinned to an exact tag — never "latest".
+    image: nvidia/cuopt:26.8.0-cuda12.9-py3.12
+    container_name: cuopt_server
+    runtime: nvidia
+    command: python -m cuopt_server.cuopt_service -p 5000
+    ports:
+      - "5000:5000"
+    environment:
+      # NVIDIA GPU configuration
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1  # Use 1 GPU (or 'all' for all available)
+              capabilities: [gpu]
+    healthcheck:
+      # Python urllib one-liner (the cuOpt image is python-based; no curl needed).
+      # Non-2xx raises and the check fails.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/cuopt/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # cuOpt model load on cold start is slow

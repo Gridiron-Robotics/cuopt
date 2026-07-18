@@ -1,0 +1,45 @@
+cuOpt Server has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+The in-cluster address other services should use is:
+
+    http://{{ include "cuopt-server.fullname" . }}:{{ .Values.service.port }}
+
+1. Wait for the pod to become Ready (model load on cold start takes a bit):
+
+   kubectl get pods --namespace {{ .Release.Namespace }} \
+     -l "app.kubernetes.io/name={{ include "cuopt-server.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -w
+
+{{- if .Values.ingress.enabled }}
+
+2. The service is exposed via Ingress at:
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else }}
+
+2. For local access (ClusterIP service), port-forward to your workstation:
+
+   kubectl port-forward --namespace {{ .Release.Namespace }} \
+     svc/{{ include "cuopt-server.fullname" . }} 5000:{{ .Values.service.port }}
+{{- end }}
+
+3. Verify the solver is up (cuOpt health endpoint returns HTTP 200):
+
+   curl http://localhost:5000/cuopt/health
+
+4. Wire the estate services at this cuOpt endpoint:
+
+   - Simulation service:  CUOPT_URL=http://{{ include "cuopt-server.fullname" . }}:{{ .Values.service.port }}
+   - Floorplans pipeline: RL_CUOPT_REST_URL=http://{{ include "cuopt-server.fullname" . }}:{{ .Values.service.port }}
+                          RL_CUOPT_BACKEND=rest
+
+   Request/response contract (cuOpt 26.08):
+     - Submit a problem:  POST http://<service>:5000/cuopt/request
+     - Poll the result:   GET  http://<service>:5000/cuopt/solution/{reqId}
+
+Notes:
+  - This workload requires a GPU node with the NVIDIA device plugin installed
+    (nvidia.com/gpu must be schedulable). Each replica consumes one full GPU.
+  - The server runs: python -m cuopt_server.cuopt_service -p 5000

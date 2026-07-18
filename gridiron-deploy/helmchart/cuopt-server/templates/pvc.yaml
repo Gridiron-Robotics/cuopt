@@ -1,0 +1,20 @@
+{{- if .Values.persistence.enabled }}
+# Optional scratch volume, mounted at /data in the solver container. Only
+# rendered when persistence.enabled=true (cuOpt is stateless per request, so
+# this is off by default). The Deployment references this claim by name.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cuopt-server.fullname" . }}-pvc
+  labels:
+    {{- include "cuopt-server.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | default "1Gi" }}
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}
