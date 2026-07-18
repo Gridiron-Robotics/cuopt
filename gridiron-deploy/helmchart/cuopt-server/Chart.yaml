@@ -1,0 +1,29 @@
+# Gridiron estate deploy path for the self-hosted NVIDIA cuOpt solver.
+#
+# This chart stands up the real "cuopt-server" as a standalone GPU microservice
+# so the estate's simulation service (CUOPT_URL) and the floorplans pipeline
+# (RL_CUOPT_REST_URL, RL_CUOPT_BACKEND=rest) can point at a live solver.
+#
+# Adapted from the upstream NVIDIA cuOpt Server chart, re-homed to Gridiron
+# conventions. No secrets live in this chart.
+apiVersion: v2
+name: cuopt-server
+description: Gridiron estate deploy path for the self-hosted NVIDIA cuOpt solver (cuopt-server) as a standalone GPU microservice.
+type: application
+# Chart version — bump on every chart change (SemVer). Independent of appVersion.
+version: 0.1.0
+# The cuOpt release this chart deploys by default (image tag derives from this).
+appVersion: "26.8.0"
+home: https://docs.nvidia.com/cuopt/user-guide/latest/resources.html
+sources:
+  - https://docs.nvidia.com/cuopt/user-guide/latest/resources.html
+  - https://hub.docker.com/r/nvidia/cuopt
+keywords:
+  - nvidia
+  - cuopt
+  - optimization
+  - gpu
+  - routing
+  - gridiron
+maintainers:
+  - name: Gridiron Robotics Platform Team
