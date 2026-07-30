@@ -48,6 +48,26 @@ def test_error_emits_error_severity_otlp_record():
     assert hit and hit[0].log_record.severity_number == SeverityNumber.ERROR
 
 
+def test_severity_text_is_populated_not_just_the_number():
+    """OpenObserve derives the `level` field it alerts on from severity **text**.
+
+    A record carrying only severity_number satisfies every OTel assertion above
+    and still fires nothing: the `level=error` rule never matches, so the solver
+    can be crashing while the self-heal loop sees an empty result set.
+    """
+    exp = InMemoryLogRecordExporter()
+    otel.setup_observability(SERVICE, _log_exporter=exp)
+    logging.getLogger("cuopt.solver").error("GPU OOM during MILP presolve")
+    otel.shutdown()
+    hit = [
+        r
+        for r in exp.get_finished_logs()
+        if "GPU OOM during MILP presolve" in str(r.log_record.body)
+    ]
+    assert hit, "the error was not exported at all"
+    assert hit[0].log_record.severity_text == "ERROR"
+
+
 def test_service_name_tags_the_stream():
     exp = InMemoryLogRecordExporter()
     otel.setup_observability(SERVICE, _log_exporter=exp)
@@ -81,3 +101,20 @@ def test_disabled_by_default_is_graceful_noop(monkeypatch):
         "fastapi": False,
         "httpx": False,
     }
+
+
+def test_importing_the_asgi_overlay_does_not_drag_in_the_cuopt_runtime():
+    """The overlay must be inspectable without a GPU or the solver installed.
+
+    ``app`` used to be built at module scope, which made the lazy import inside
+    ``build_app`` pointless: any import of this module — a linter, a type check,
+    this test file — pulled in ``cuopt_server`` and its GPU libraries. uvicorn
+    resolves ``module:app`` with getattr, so PEP 562 keeps the entrypoint working
+    while the import stays cheap.
+    """
+    import sys
+
+    from gridiron.observability import asgi
+
+    assert asgi.SERVICE_NAME == "cuopt"
+    assert "cuopt_server" not in sys.modules

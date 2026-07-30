@@ -29,6 +29,8 @@ transparent pass-through: it returns the untouched upstream app.
 
 from __future__ import annotations
 
+import logging
+
 # Import the estate drop-in from the same overlay package. Keep this file free of
 # any *upstream* import at module top so tooling that only inspects the overlay
 # (lint/type/test) never needs cuOpt or a GPU present.
@@ -44,14 +46,37 @@ def build_app():
     Importing ``cuopt_server.webserver`` pulls in the full cuOpt runtime (and,
     in production, GPU libraries) — so it is imported lazily *here*, only when an
     ASGI server actually boots this entrypoint, never at overlay import time.
+
+    The Contract-A MCP router is mounted on the same app, so a co-located deploy
+    serves the solver and its tool surface on one port. Mounting is best-effort:
+    the solver must still boot if the MCP overlay's own deps are missing.
     """
     from cuopt_server.webserver import app as upstream_app
 
     # Instrument in place: OTLP traces + ERROR-log export + FastAPI/httpx spans.
     # setup_observability is idempotent and a graceful no-op when OTEL_* is unset.
     setup_observability(SERVICE_NAME, app=upstream_app)
+
+    try:
+        from gridiron.mcp.app import build_mcp_router
+
+        upstream_app.include_router(build_mcp_router(), prefix="/mcp")
+    except Exception:  # pragma: no cover - never block the solver on the overlay
+        logging.getLogger(__name__).warning(
+            "Gridiron MCP router not mounted; cuOpt serving without a tool surface",
+            exc_info=True,
+        )
     return upstream_app
 
 
-# Module-level ASGI callable uvicorn imports as ``gridiron.observability.asgi:app``.
-app = build_app()
+def __getattr__(name: str):
+    """Resolve ``app`` on first access (PEP 562).
+
+    uvicorn's ``module:app`` target does a ``getattr`` after import, so this still
+    works as an entrypoint — but merely *importing* this module (lint, type-check,
+    a test that only wants SERVICE_NAME) no longer drags in the cuOpt runtime and
+    a GPU. Building at module scope made the lazy import in ``build_app`` pointless.
+    """
+    if name == "app":
+        return build_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

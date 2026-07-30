@@ -9,21 +9,30 @@ in the seams around the untouched solver:
 | Path | Role |
 |---|---|
 | `gridiron/observability/` | OpenObserve/OTLP self-heal drop-in + an instrumented ASGI entrypoint that wraps the upstream cuOpt server so failed solves surface as estate incidents. |
+| `gridiron/mcp/` | The estate **Contract-A** tool surface (`GET /tools`, `POST /invoke`) over the solver, plus the fleet task-assignment encoder/decoder. Runs as a sidecar with no GPU, or mounts at `/mcp` on the co-located server. |
 
 ## Where cuOpt sits in the estate
 
-cuOpt is a **GPU-required Server API**, not an MCP module. It is reached through
-its consuming module's client, not directly by the agent brain:
+cuOpt is a **GPU-required Server API**. Its consumers reach it two ways:
 
-- `delivery_optimization` calls it via `CUOPT_BASE_URL` (`/cuopt/request`) for
-  last-mile routing.
-- The robotics **fleet VRP task-assignment hook** (which robot does which
-  pick/place, and in what order) is *scoped* — it will encode the fleet
-  assignment problem as a cuOpt request through the same seam. Not yet built.
+- **Directly, via its own client.** `delivery_optimization` calls
+  `/cuopt/request` at `CUOPT_BASE_URL` for last-mile routing.
+- **As agent tools, via `gridiron/mcp/`.** The robotics fleet hook — which robot
+  does which pick/place, and in what order — is the `assign_fleet_tasks` tool.
 
-Because cuOpt is upstream + GPU-bound, there is deliberately **no Contract-A MCP
-surface in this repo** — that would be a fork of upstream. The MCP/tool surface
-belongs to the consuming modules (`delivery_optimization`, the fleet gateway),
-which already expose it.
+### Note: this repo used to say it should have no MCP surface
 
-See `gridiron/observability/README.md` for the observability seam.
+An earlier version of this README argued that a Contract-A surface here would
+amount to forking upstream, and that the tool surface belonged only to the
+consuming modules. That was wrong on both counts, and the correction is the
+`gridiron/mcp/` overlay:
+
+1. The surface is **in the overlay**, not upstream. No cuOpt source is touched,
+   and the sidecar runs without the cuOpt runtime or a GPU at all.
+2. Pushing the surface into consumers meant each one re-derived cuOpt's
+   **index-space** request model — vehicles and tasks as positions in a cost
+   matrix — and an indexing mistake there produces a payload that VALIDATES and
+   returns a confident answer about the wrong robots. Encoding it once, tested
+   against upstream's own documented examples, is the point.
+
+See `gridiron/observability/README.md` and `gridiron/mcp/README.md` for each seam.
