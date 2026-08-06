@@ -1,0 +1,9 @@
+# OpenObserve/OTLP self-heal deps for the cuOpt observability overlay.
+# Pinned exactly (estate rule: no floating versions). These are additive to the
+# upstream cuOpt server env and are only needed where gridiron.observability.asgi
+# is the ASGI entrypoint. With them absent the drop-in degrades to a no-op.
+opentelemetry-api==1.42.1
+opentelemetry-sdk==1.42.1
+opentelemetry-exporter-otlp-proto-http==1.42.1
+opentelemetry-instrumentation-fastapi==0.63b1
+opentelemetry-instrumentation-httpx==0.63b1

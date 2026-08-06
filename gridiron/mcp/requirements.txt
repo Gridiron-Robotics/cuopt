@@ -1,0 +1,13 @@
+# Deps for the Gridiron Contract-A MCP overlay (gridiron/mcp).
+#
+# Pinned exactly (estate rule: no floating versions). Only needed where the MCP
+# surface runs standalone as the sidecar (gridiron.mcp.app:app) — that install
+# needs no GPU and no cuOpt runtime. In a CO-LOCATED deploy the router mounts on
+# the upstream cuOpt server, which already brings fastapi and pins
+# uvicorn==0.34.* itself (python/cuopt_server/pyproject.toml); do NOT install this
+# file there, or the uvicorn pin below fights upstream's.
+#
+# These are the versions the overlay tests are run against.
+fastapi==0.104.1
+uvicorn==0.24.0
+httpx==0.25.1
