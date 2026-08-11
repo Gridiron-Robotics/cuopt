@@ -29,7 +29,10 @@ PY="${PYTHON:-python3}"
 
 # --------------------------------------------------------------------------- #
 hdr "overlay tests — no GPU, no solver, no network"
-if "$PY" -m pytest gridiron/ -q -p no:cacheprovider >/tmp/cuopt-gate-tests.log 2>&1; then
+# Both overlay trees. `gridiron/` alone left gridiron-deploy/tests/test_helmchart.py
+# uncollected — there is no root pytest config to widen the default path — so the
+# deploy assertions (image tag, ports, the MCP sidecar wiring) judged nothing.
+if "$PY" -m pytest gridiron/ gridiron-deploy/ -q -p no:cacheprovider >/tmp/cuopt-gate-tests.log 2>&1; then
   ok "$(grep -oE '[0-9]+ passed' /tmp/cuopt-gate-tests.log | tail -1)"
 else
   bad "overlay suite red"
@@ -94,15 +97,30 @@ if [ $? -eq 0 ]; then ok "all tools annotated; cancel_solve destructive"; else b
 
 # --------------------------------------------------------------------------- #
 hdr "one service name — stream == incident module"
+# Three consumers, one literal. The alert rule is registered per stream, so a
+# service shipping under one name while the alert watches another is wired at both
+# ends and joined in the middle nowhere. No `or "cuopt"` fallback here: a fallback
+# in a gate is exactly what made this step unable to fail.
 "$PY" - <<'EOF'
 import sys
 sys.path.insert(0, ".")
+from gridiron.mcp.tools import SERVER_NAME
 from gridiron.observability import gridiron_otel as otel
+from gridiron.observability.asgi import SERVICE_NAME
 
-name = getattr(otel, "DEFAULT_SERVICE_NAME", None) or "cuopt"
-print(f"   service.name == OpenObserve stream == incident module == {name!r}")
+names = {
+    "gridiron_otel.DEFAULT_SERVICE_NAME": otel.DEFAULT_SERVICE_NAME,
+    "asgi.SERVICE_NAME": SERVICE_NAME,
+    "tools.SERVER_NAME": SERVER_NAME,
+}
+if len(set(names.values())) != 1:
+    for where, value in names.items():
+        print(f"   {where} = {value!r}")
+    print("   FAIL: the stream, the tool server and the incident module disagree")
+    sys.exit(1)
+print(f"   service.name == OpenObserve stream == incident module == {SERVICE_NAME!r}")
 EOF
-ok "identity resolved from one place"
+if [ $? -eq 0 ]; then ok "identity resolved from one place"; else bad "service identity"; fi
 
 # --------------------------------------------------------------------------- #
 hdr "upstream is untouched"

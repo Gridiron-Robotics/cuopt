@@ -34,10 +34,12 @@ import logging
 # Import the estate drop-in from the same overlay package. Keep this file free of
 # any *upstream* import at module top so tooling that only inspects the overlay
 # (lint/type/test) never needs cuOpt or a GPU present.
-from gridiron.observability.gridiron_otel import setup_observability
+from gridiron.observability.gridiron_otel import DEFAULT_SERVICE_NAME, setup_observability
 
-# The OpenObserve stream / incident module for this service.
-SERVICE_NAME = "cuopt"
+# The OpenObserve stream / incident module for this service. Aliased rather than
+# re-spelled: the literal lives in exactly one place (gridiron_otel), so the
+# stream, the tool-server name and the incident module cannot drift apart.
+SERVICE_NAME = DEFAULT_SERVICE_NAME
 
 
 def build_app():

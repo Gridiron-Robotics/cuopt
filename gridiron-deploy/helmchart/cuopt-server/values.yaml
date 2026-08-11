@@ -119,6 +119,85 @@ command:
 # Extra environment variables for the solver container (list of name/value maps).
 env: []
 
+# ---------------------------------------------------------------------------
+# Contract-A MCP sidecar (gridiron.mcp.app:app).
+#
+# A SEPARATE Deployment, not a second container in the solver pod. Two reasons:
+# the solver pod pins one whole GPU per replica (see resources above), so the tool
+# surface must be able to scale without buying GPUs; and the estate addresses it
+# at its own hostname.
+#
+# THE SERVICE NAME IS LOAD-BEARING. langgraph-agents wires the `gpu_solver` server
+# to http://cuopt-mcp:8090, so the Service must be named literally `cuopt-mcp`.
+# `cuopt-server.fullname` renders <release>-cuopt-server, which would NOT match —
+# hence fullnameOverride below.
+mcp:
+  # Set false to deploy the solver alone (e.g. when the MCP router is mounted
+  # co-located on the solver app by gridiron.observability.asgi instead).
+  enabled: true
+
+  replicaCount: 1
+
+  image:
+    # Built from gridiron-deploy/Dockerfile.mcp; push it to your registry.
+    repository: gridiron/cuopt-mcp
+    # Exact, immutable tag — never "latest" or a floating tag.
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  # MUST stay "cuopt-mcp": it is the DNS name the estate's brain already holds.
+  fullnameOverride: cuopt-mcp
+
+  service:
+    type: ClusterIP
+    port: 8090
+    targetPort: 8090
+
+  # The solver this sidecar proxies to (CUOPT_BASE_URL). Empty ⇒ the template
+  # derives http://<solver-fullname>:<service.port> in-cluster. Values files are
+  # not templated, so the default cannot be spelled here.
+  solverUrl: ""
+
+  # Per-call HTTP timeout against the solver, seconds (CUOPT_TIMEOUT_SECONDS).
+  timeoutSeconds: 30
+
+  # The bearer token the tool surface enforces (CUOPT_MCP_TOKEN). Taken by
+  # reference from a Secret that ALREADY EXISTS in the namespace — Chart.yaml
+  # states no secrets live in this chart, so none is templated. With `name` empty
+  # the env var is not injected and the surface fail-closes (503 on every tool
+  # route) by design: it will not serve unmetered GPU time without a credential.
+  tokenSecret:
+    name: ""
+    key: CUOPT_MCP_TOKEN
+
+  # Estate self-heal rail. `endpoint` empty ⇒ the drop-in is a graceful no-op.
+  # OTEL_SERVICE_NAME is fixed to "cuopt" in the template: it is simultaneously
+  # the OpenObserve stream and the self-heal incident 'module', so it is not a knob.
+  otel:
+    enabled: true
+    endpoint: ""
+    # Authorization header for OpenObserve, by reference from an existing Secret.
+    headersSecret:
+      name: ""
+      key: OTEL_EXPORTER_OTLP_HEADERS
+    logLevel: ERROR
+
+  # No GPU here — that is the entire reason this is a separate container.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 # Optional persistent storage. cuOpt is stateless per request, so this is off by
 # default; enable only if a workload needs a scratch volume mounted at /data.
 persistence:

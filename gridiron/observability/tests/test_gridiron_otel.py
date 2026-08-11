@@ -118,3 +118,19 @@ def test_importing_the_asgi_overlay_does_not_drag_in_the_cuopt_runtime():
 
     assert asgi.SERVICE_NAME == "cuopt"
     assert "cuopt_server" not in sys.modules
+
+
+def test_one_service_name_feeds_stream_tool_server_and_incident_module():
+    """The stream, the MCP server name and the incident module are one string.
+
+    The shell gate checks this too, but a gate is not always what runs. Pinning it
+    here means the invariant holds under a plain ``pytest gridiron/`` as well —
+    and it names the failure precisely, rather than leaving a future editor to
+    discover that OpenObserve has records nobody's alert is watching.
+    """
+    from gridiron.mcp.tools import SERVER_NAME
+    from gridiron.observability import asgi, gridiron_otel
+
+    assert gridiron_otel.DEFAULT_SERVICE_NAME == "cuopt"
+    assert asgi.SERVICE_NAME == gridiron_otel.DEFAULT_SERVICE_NAME
+    assert SERVER_NAME == asgi.SERVICE_NAME

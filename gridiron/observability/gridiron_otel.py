@@ -51,6 +51,19 @@ from typing import Any
 
 _log = logging.getLogger("gridiron_otel")
 
+#: The single string that must be identical in three places:
+#:
+#: 1. the ``service.name`` resource attribute on every record this process ships,
+#: 2. the OpenObserve **stream** those records land in,
+#: 3. the ``module`` field of the incident the langgraph self-heal loop receives.
+#:
+#: The estate alert rule is registered *per stream*, so a service that ships under
+#: one name while the alert watches another is wired at both ends and joined in the
+#: middle nowhere — the rail looks live and reports nothing. It is also the MCP
+#: ``server`` name (``gridiron.mcp.tools.SERVER_NAME``), because a gateway routing
+#: ``server=cuopt`` and an incident tagged ``module=cuopt`` must name one thing.
+DEFAULT_SERVICE_NAME = "cuopt"
+
 # Idempotency guard — setup runs once per process.
 _STATE: dict[str, Any] = {"done": False, "status": None, "providers": []}
 

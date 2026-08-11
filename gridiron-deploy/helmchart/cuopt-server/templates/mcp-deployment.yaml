@@ -1,0 +1,124 @@
+{{- if .Values.mcp.enabled }}
+# The Contract-A MCP tool surface (gridiron.mcp.app:app) as its OWN Deployment.
+#
+# Not a second container in the solver pod: the solver pins one whole GPU per
+# replica, and this must scale — and be addressable — independently.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.mcp.fullnameOverride }}
+  labels:
+    {{- include "cuopt-server.mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.mcp.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cuopt-server.mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.mcp.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "cuopt-server.mcp.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cuopt-server.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.mcp.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mcp
+          securityContext:
+            {{- toYaml .Values.mcp.securityContext | nindent 12 }}
+          image: "{{ .Values.mcp.image.repository }}:{{ .Values.mcp.image.tag }}"
+          imagePullPolicy: {{ .Values.mcp.image.pullPolicy }}
+          command:
+            - uvicorn
+            - gridiron.mcp.app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "{{ .Values.mcp.service.targetPort }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.mcp.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: CUOPT_BASE_URL
+              value: {{ include "cuopt-server.mcp.solverUrl" . | quote }}
+            - name: CUOPT_TIMEOUT_SECONDS
+              value: {{ .Values.mcp.timeoutSeconds | quote }}
+            {{- if .Values.mcp.tokenSecret.name }}
+            # By reference from a pre-existing Secret; this chart templates none.
+            # Omitting it is safe-by-design: the surface fail-closes with 503.
+            - name: CUOPT_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mcp.tokenSecret.name }}
+                  key: {{ .Values.mcp.tokenSecret.key }}
+            {{- end }}
+            {{- if .Values.mcp.otel.enabled }}
+            - name: OTEL_ENABLED
+              value: "1"
+            # Fixed, not a knob: this string is simultaneously the OpenObserve
+            # stream and the self-heal incident 'module'
+            # (gridiron/observability/gridiron_otel.py DEFAULT_SERVICE_NAME).
+            - name: OTEL_SERVICE_NAME
+              value: "cuopt"
+            - name: OTEL_LOG_LEVEL
+              value: {{ .Values.mcp.otel.logLevel | quote }}
+            {{- with .Values.mcp.otel.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.mcp.otel.headersSecret.name }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mcp.otel.headersSecret.name }}
+                  key: {{ .Values.mcp.otel.headersSecret.key }}
+            {{- end }}
+            {{- end }}
+          # `exec`, not httpGet: the only unauthenticated route is HEAD / and an
+          # httpGet probe cannot issue HEAD. GET /tools answers 401/503 without a
+          # bearer, so probing it would flap forever.
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import urllib.request; urllib.request.urlopen(urllib.request.Request('http://localhost:{{ .Values.mcp.service.targetPort }}/', method='HEAD'), timeout=3)
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import urllib.request; urllib.request.urlopen(urllib.request.Request('http://localhost:{{ .Values.mcp.service.targetPort }}/', method='HEAD'), timeout=3)
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # No nvidia.com/gpu here, on purpose.
+          resources:
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
+      {{- with .Values.mcp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcp.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcp.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

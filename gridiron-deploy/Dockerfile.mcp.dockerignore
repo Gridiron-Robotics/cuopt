@@ -1,0 +1,15 @@
+# Build-context filter for Dockerfile.mcp (BuildKit reads
+# "<dockerfile>.dockerignore" in preference to the context-root .dockerignore).
+#
+# The build context has to be the repo ROOT so the image can COPY the `gridiron/`
+# package — but the repo root is the whole NVIDIA cuOpt source tree (cpp/, CUDA,
+# datasets, notebooks). Without this file every build uploads all of it to the
+# daemon to use one small pure-Python package.
+#
+# A repo-root .dockerignore would be the usual place for this; it is deliberately
+# NOT used, because this fork's house rule is that nothing outside `gridiron*` is
+# touched (enforced by gridiron/verify.sh step 5).
+#
+# Whitelist: exclude every top-level entry, then re-include the overlay package.
+*
+!gridiron
