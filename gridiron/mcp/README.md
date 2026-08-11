@@ -48,10 +48,21 @@ so it goes through the middleware HITL approval gate.
 
 ```bash
 pip install -r gridiron/mcp/requirements.txt
-CUOPT_BASE_URL=http://cuopt-solver:5000 \
+CUOPT_BASE_URL=http://cuopt:5000 \
 CUOPT_MCP_TOKEN=<estate service token> \
-uvicorn gridiron.mcp.app:app --host 0.0.0.0 --port 5100
+uvicorn gridiron.mcp.app:app --host 0.0.0.0 --port 8090
 ```
+
+**8090 is not a preference.** The estate's brain (`langgraph-agents`) wires its
+`gpu_solver` server to `http://cuopt-mcp:8090`, so the port and the hostname are
+both contract. The packaged form of exactly this command ships in
+[`gridiron-deploy/`](../../gridiron-deploy/README.md): `Dockerfile.mcp`, the
+`cuopt-mcp` service in `docker-compose.cuopt.yml`, and the chart's
+`mcp-deployment.yaml` / `mcp-service.yaml`.
+
+Also install `gridiron/observability/requirements.txt` alongside the above.
+Without it the self-heal drop-in is absent, `build_app` logs *"observability
+drop-in unavailable"* and serves on — with the OpenObserve rail silently dead.
 
 **Co-located** — `gridiron.observability.asgi` mounts the same router at `/mcp`
 on the upstream app, so one port serves both. Do *not* install

@@ -11,7 +11,8 @@ name: cuopt-server
 description: Gridiron estate deploy path for the self-hosted NVIDIA cuOpt solver (cuopt-server) as a standalone GPU microservice.
 type: application
 # Chart version — bump on every chart change (SemVer). Independent of appVersion.
-version: 0.1.0
+# 0.2.0: adds the Contract-A MCP sidecar (cuopt-mcp Deployment + Service, :8090).
+version: 0.2.0
 # The cuOpt release this chart deploys by default (image tag derives from this).
 appVersion: "26.8.0"
 home: https://docs.nvidia.com/cuopt/user-guide/latest/resources.html

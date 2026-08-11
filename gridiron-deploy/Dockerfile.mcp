@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1
+#
+# The Gridiron Contract-A MCP sidecar for cuOpt (gridiron.mcp.app:app).
+#
+# NO GPU. That is the whole point of it being a separate image: the GPU box stays
+# a pure solver (one whole GPU per replica), while the tool surface the estate's
+# brain calls — http://cuopt-mcp:8090 — scales on its own and can be scheduled
+# anywhere. It reaches the solver over HTTP at CUOPT_BASE_URL.
+#
+# BUILD CONTEXT IS THE REPO ROOT, not this directory — the image needs the
+# `gridiron/` package:
+#
+#   docker build -f gridiron-deploy/Dockerfile.mcp -t gridiron/cuopt-mcp:0.1.0 .
+#
+# docker-compose.cuopt.yml expresses the same thing as
+# `build: {context: .., dockerfile: gridiron-deploy/Dockerfile.mcp}`.
+# Dockerfile.mcp.dockerignore (next to this file) keeps that context to the
+# overlay instead of shipping the whole cuOpt source tree to the daemon.
+
+# Pinned to an exact minor + Debian release — never "latest", never a bare
+# floating tag. The versions that actually decide behaviour (fastapi, uvicorn,
+# httpx, the OpenTelemetry stack) are pinned exactly in the two requirements
+# files below; pin this by digest as well if your registry policy demands it.
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+# Both requirement sets, deliberately:
+#   - gridiron/mcp/requirements.txt          fastapi / uvicorn / httpx  (the surface)
+#   - gridiron/observability/requirements.txt opentelemetry-*           (the self-heal rail)
+# Without the second, gridiron/mcp/app.py logs "observability drop-in unavailable"
+# and serves on — silently, with the OpenObserve rail this module exists for dead.
+#
+# NOTE the inverse rule: do NOT install gridiron/mcp/requirements.txt into the
+# co-located solver image. Its own header says why — the uvicorn pin here fights
+# upstream cuOpt's uvicorn==0.34.*.
+COPY gridiron/mcp/requirements.txt /tmp/requirements-mcp.txt
+COPY gridiron/observability/requirements.txt /tmp/requirements-observability.txt
+RUN pip install --no-cache-dir \
+        -r /tmp/requirements-mcp.txt \
+        -r /tmp/requirements-observability.txt \
+    && rm -f /tmp/requirements-mcp.txt /tmp/requirements-observability.txt
+
+# The overlay only. Upstream cuOpt (cpp/, python/, ci/, …) is not in this image
+# and must not be: the sidecar never imports the solver, it calls it over HTTP.
+COPY gridiron/ /app/gridiron/
+
+# Unprivileged: the process needs no filesystem writes and no host access.
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin gridiron
+USER 10001
+
+EXPOSE 8090
+
+# HEAD / is unauthenticated on purpose (gridiron/mcp/app.py) so an orchestrator
+# can probe liveness without holding a credential. GET /tools is NOT — it answers
+# 401/503 without a bearer, so it would flap forever as a healthcheck.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://localhost:8090/', method='HEAD'), timeout=3)"]
+
+CMD ["uvicorn", "gridiron.mcp.app:app", "--host", "0.0.0.0", "--port", "8090"]

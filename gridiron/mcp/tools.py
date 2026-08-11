@@ -33,10 +33,14 @@ from gridiron.mcp.fleet_assignment import (
     decode_assignment,
     encode_assignment,
 )
+from gridiron.observability.gridiron_otel import DEFAULT_SERVICE_NAME
 
 _log = logging.getLogger("gridiron.mcp.cuopt")
 
-SERVER_NAME = "cuopt"
+# The MCP ``server`` name is the same string as the OpenObserve stream and the
+# self-heal incident ``module``. Imported, not re-spelled — gridiron_otel is
+# stdlib-only, so this costs the MCP package no new dependency and cannot cycle.
+SERVER_NAME = DEFAULT_SERVICE_NAME
 
 
 class ToolError(Exception):

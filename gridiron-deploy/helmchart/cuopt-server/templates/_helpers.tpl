@@ -54,6 +54,45 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+MCP sidecar selector labels.
+
+Deliberately DIFFERENT from cuopt-server.selectorLabels. The solver Service
+selects on name+instance only, so if the MCP pods carried the same pair the
+solver Service would start load-balancing solve traffic onto a sidecar that has
+no GPU and does not speak the solver's API. Both the name suffix and the
+component label keep the two sets disjoint.
+*/}}
+{{- define "cuopt-server.mcp.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "cuopt-server.name" . }}-mcp
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: mcp
+{{- end }}
+
+{{/*
+MCP sidecar common labels
+*/}}
+{{- define "cuopt-server.mcp.labels" -}}
+helm.sh/chart: {{ include "cuopt-server.chart" . }}
+{{ include "cuopt-server.mcp.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: gridiron-estate
+{{- end }}
+
+{{/*
+The in-cluster URL of the solver the MCP sidecar proxies to.
+*/}}
+{{- define "cuopt-server.mcp.solverUrl" -}}
+{{- if .Values.mcp.solverUrl }}
+{{- .Values.mcp.solverUrl }}
+{{- else }}
+{{- printf "http://%s:%v" (include "cuopt-server.fullname" .) .Values.service.port }}
+{{- end }}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "cuopt-server.serviceAccountName" -}}

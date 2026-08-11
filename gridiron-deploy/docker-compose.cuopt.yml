@@ -44,3 +44,64 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s  # cuOpt model load on cold start is slow
+    networks:
+      # Both services join the estate network explicitly. Declaring `networks:` on
+      # ONE service would drop it off the implicit default network — and then the
+      # sidecar could no longer resolve `cuopt`, which is the exact failure this
+      # wiring exists to prevent.
+      - erp_shared_network
+
+  # --------------------------------------------------------------------------- #
+  # The Contract-A MCP tool surface the estate's brain calls at
+  # http://cuopt-mcp:8090 (langgraph-agents: gpu_solver server).
+  #
+  # Separate container, NO GPU — see gridiron/mcp/README.md. The GPU box stays a
+  # pure solver; this proxies to it over HTTP at CUOPT_BASE_URL.
+  cuopt-mcp:
+    build:
+      # Context is the repo root: the image needs the `gridiron/` package.
+      context: ..
+      dockerfile: gridiron-deploy/Dockerfile.mcp
+    image: gridiron/cuopt-mcp:0.1.0   # exact tag — never "latest"
+    # Literal name so the brain's URL host `cuopt-mcp` resolves on the shared network.
+    container_name: cuopt-mcp
+    ports:
+      - "8090:8090"
+    environment:
+      # In-container the solver is `cuopt:5000`, not localhost — the client's
+      # default (http://localhost:5000) is wrong here.
+      - CUOPT_BASE_URL=http://cuopt:5000
+      # `:?` fails `docker compose up` when the token is unset, rather than
+      # booting a surface that fail-closes 503 on every call and looks alive.
+      # Never set CUOPT_MCP_ALLOW_INSECURE here — it reopens the tool surface.
+      - "CUOPT_MCP_TOKEN=${CUOPT_MCP_TOKEN:?set CUOPT_MCP_TOKEN}"
+      - CUOPT_TIMEOUT_SECONDS=30
+      # Estate self-heal rail (gridiron/observability/README.md). Unset endpoint
+      # ⇒ graceful no-op, so this is safe on a workstation.
+      - OTEL_ENABLED=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      # == the OpenObserve stream == the self-heal incident 'module'.
+      - OTEL_SERVICE_NAME=cuopt
+      - OTEL_LOG_LEVEL=ERROR
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      cuopt:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      # HEAD / is unauthenticated on purpose (gridiron/mcp/app.py). GET /tools is
+      # not — it answers 401/503 without a bearer and would flap forever.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://localhost:8090/', method='HEAD'), timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - erp_shared_network
+
+networks:
+  # Created once by the estate (erp_django_middleware); joined, not owned, here:
+  #   docker network create erp_shared_network
+  erp_shared_network:
+    external: true
