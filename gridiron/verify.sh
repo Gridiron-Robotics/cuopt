@@ -20,6 +20,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 fail=0
+partial=0
 n=0
 hdr() { n=$((n + 1)); echo; echo "── $n · $* ──"; }
 ok() { echo "✅ $*"; }
@@ -94,15 +95,79 @@ if [ $? -eq 0 ]; then ok "all tools annotated; cancel_solve destructive"; else b
 
 # --------------------------------------------------------------------------- #
 hdr "one service name — stream == incident module"
+# This step used to read `getattr(otel, "DEFAULT_SERVICE_NAME", None) or "cuopt"`
+# and then call ok() unconditionally. DEFAULT_SERVICE_NAME has never existed, so
+# the getattr always fell through to the literal and the step asserted nothing —
+# it printed 'cuopt' and passed with the module deleted. Assert the invariant
+# that actually matters instead: the OTLP service.name (= the OpenObserve stream
+# = the incident 'module') and the Contract-A server name are the same string.
+# When they drift, an alert fires on one stream while the tool surface is
+# registered under another name, and nobody correlates them.
 "$PY" - <<'EOF'
 import sys
 sys.path.insert(0, ".")
-from gridiron.observability import gridiron_otel as otel
+from gridiron.mcp.tools import SERVER_NAME
+from gridiron.observability.asgi import SERVICE_NAME
 
-name = getattr(otel, "DEFAULT_SERVICE_NAME", None) or "cuopt"
-print(f"   service.name == OpenObserve stream == incident module == {name!r}")
+if not SERVICE_NAME or not SERVER_NAME:
+    print("   FAIL: service identity is empty")
+    sys.exit(1)
+if SERVICE_NAME != SERVER_NAME:
+    print(
+        f"   FAIL: observability service.name {SERVICE_NAME!r} != MCP server "
+        f"name {SERVER_NAME!r}; alerts and tools would land under two identities"
+    )
+    sys.exit(1)
+print(f"   service.name == OpenObserve stream == MCP server == {SERVICE_NAME!r}")
 EOF
-ok "identity resolved from one place"
+if [ $? -eq 0 ]; then ok "identity resolved from one place"; else bad "service identity"; fi
+
+# --------------------------------------------------------------------------- #
+hdr "gridiron manifests pin exact versions"
+# The estate rule, with ONE carve-out: the CUDA/RAPIDS stack is left as floors
+# because those wheels are platform/CUDA-specific and a hard pin breaks installs
+# on mismatched targets. That carve-out is an allow-list BY NAME below — never a
+# pattern, because a pattern like "anything with cu in it" silently exempts
+# whatever a future author happens to name that way.
+"$PY" - <<'EOF'
+import pathlib
+import re
+import sys
+
+# Exact package names exempted from the == rule. Names, not patterns.
+CUDA_RAPIDS_FLOORS = {
+    "cuda-python", "cudf", "cugraph", "cuml", "cupy", "cupy-cuda11x",
+    "cupy-cuda12x", "cuspatial", "dask-cuda", "libcudf", "libcuopt",
+    "libraft", "librmm", "numba-cuda", "nvidia-cuda-runtime-cu12",
+    "nvidia-cublas-cu12", "nvidia-curand-cu12", "nvidia-cusparse-cu12",
+    "nvidia-cusolver-cu12", "pylibcudf", "pylibraft", "raft-dask", "rmm",
+    "torch", "torchvision",
+}
+
+problems = []
+checked = 0
+for path in sorted(pathlib.Path(".").glob("gridiron*/**/requirements*.txt")):
+    for lineno, raw in enumerate(path.read_text().splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        checked += 1
+        name = re.split(r"[<>=!~\[; ]", line, 1)[0].strip().lower()
+        if name in CUDA_RAPIDS_FLOORS:
+            print(f"   carve-out (CUDA/RAPIDS, by name): {path}:{lineno} {line}")
+            continue
+        if "==" not in line:
+            problems.append(f"{path}:{lineno} {line!r} is not pinned with ==")
+
+if not checked:
+    problems.append("no gridiron requirements were found to check — the step is inert")
+
+for p in problems:
+    print(f"   {p}")
+print(f"   {checked} requirement line(s) checked")
+sys.exit(1 if problems else 0)
+EOF
+if [ $? -eq 0 ]; then ok "every gridiron dep pinned, or named in the CUDA/RAPIDS carve-out"; else bad "dependency pins"; fi
 
 # --------------------------------------------------------------------------- #
 hdr "upstream is untouched"
@@ -110,35 +175,63 @@ hdr "upstream is untouched"
 # this fork carries edits to NVIDIA's tree it stops being rebaseable onto
 # upstream, and every future cuOpt release becomes a merge conflict instead of a
 # fast-forward.
-base="$(git merge-base HEAD 8c79892 2>/dev/null || echo '')"
-if [ -z "$base" ]; then
-  echo "   (upstream base commit not present in this clone — skipped)"
+# WHY THIS IS SPLIT IN TWO. The previous version resolved a base with
+# `git merge-base HEAD 8c79892` and, when that failed, printed "skipped" and let
+# the step count toward "GREEN — 5/5". This clone is a squashed single commit, so
+# 8c79892 is not a valid object and the branch NEVER ran: the gate's headline
+# house rule was inert while reporting a clean pass. Verified by mutation —
+# appending a line to README.md still produced GREEN 5/5.
+#
+# So the half that needs no base now runs unconditionally and is the one that
+# can fail, and a missing base degrades the history half explicitly instead of
+# being laundered into the pass count.
+
+# --- half 1: the working tree. Always runnable, no base required. ----------- #
+# This is also the half that matters most in practice: it is what stands between
+# an upstream edit and a commit.
+pending="$(
+  {
+    git diff --name-only HEAD
+    git diff --name-only --cached
+    git ls-files --others --exclude-standard
+  } | sort -u | grep -Ev '^(gridiron|gridiron-deploy)/' || true
+)"
+if [ -z "$pending" ]; then
+  ok "working tree clean outside the overlay (gridiron/, gridiron-deploy/)"
 else
-  # Committed history AND the working tree. Checking only `$base..HEAD` reads
-  # the gate as green while an upstream edit sits uncommitted in front of you —
-  # which is precisely when a gate is supposed to speak. Mutation-checked: the
-  # first version of this step passed with a modified README.md staged to go.
-  touched="$(
-    {
-      git diff --name-only "$base"..HEAD
-      git diff --name-only HEAD
-      git diff --name-only --cached
-      git ls-files --others --exclude-standard
-    } | sort -u | grep -v '^gridiron' || true
-  )"
-  if [ -z "$touched" ]; then
-    ok "no changes outside gridiron/, committed or pending"
+  echo "$pending" | sed 's/^/   /'
+  bad "upstream files modified — this fork must stay rebaseable"
+fi
+
+# --- half 2: committed history, when a base can be resolved. ---------------- #
+base="$(git merge-base HEAD 8c79892 2>/dev/null || true)"
+if [ -z "$base" ]; then
+  base="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+fi
+if [ -z "$base" ]; then
+  # NOT a pass. Recorded so the summary cannot claim a clean n/n.
+  partial=$((partial + 1))
+  echo "   ⚠ committed history NOT verified: no upstream base commit in this"
+  echo "     clone (shallow/squashed). Only the working tree was checked."
+else
+  hist="$(git diff --name-only "$base"..HEAD | grep -Ev '^(gridiron|gridiron-deploy)/' || true)"
+  if [ -z "$hist" ]; then
+    ok "no committed changes outside the overlay since $(git rev-parse --short "$base")"
   else
-    echo "$touched" | sed 's/^/   /'
-    bad "upstream files modified — this fork must stay rebaseable"
+    echo "$hist" | sed 's/^/   /'
+    bad "upstream files modified in committed history"
   fi
 fi
 
 # --------------------------------------------------------------------------- #
 echo
-if [ "$fail" -eq 0 ]; then
-  echo "════════════  GREEN — $n/$n  ════════════"
-else
+if [ "$fail" -ne 0 ]; then
   echo "════════════  RED  ════════════"
+elif [ "$partial" -ne 0 ]; then
+  # A gate that cannot check something must say so in the banner, not bury it.
+  echo "════════════  GREEN with $partial UNVERIFIED check(s) — $n steps  ════════════"
+  echo "  (see the ⚠ above; this is not a clean pass)"
+else
+  echo "════════════  GREEN — $n/$n  ════════════"
 fi
 exit "$fail"
