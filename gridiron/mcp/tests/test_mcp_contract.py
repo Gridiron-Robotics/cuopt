@@ -301,6 +301,33 @@ def test_idempotency_key_replays_instead_of_resolving():
     assert len(transport.calls) == 1, "the replay still called the solver"
 
 
+def test_replay_works_within_one_named_tenant():
+    """The positive half of tenant scoping, and it is load-bearing.
+
+    The two neighbouring tests are both satisfied by a cache that never hits:
+    the replay test above sends no X-Tenant-Id (so the key's tenant is the "-"
+    default), and the scoping test below only asserts that tenant B does NOT
+    replay. A mutant that looked every entry up under a constant tenant survived
+    both. This pins the other direction — the SAME named tenant must get its own
+    cached answer back, so the tenant is really part of the key rather than
+    decoration.
+    """
+    transport = _fake_transport([Response(200, _SOLVED), Response(200, _SOLVED)])
+    client = CuoptClient("http://solver:5000", transport=transport)
+    body = {
+        "tool": "assign_fleet_tasks",
+        "arguments": {"robots": ROBOTS, "tasks": TASKS, "cost_matrix": MATRIX},
+    }
+    headers = {**AUTH, "Idempotency-Key": "k", "X-Tenant-Id": "acme"}
+    with _app(client) as c:
+        first = c.post("/invoke", json=body, headers=headers)
+        second = c.post("/invoke", json=body, headers=headers)
+    assert first.json().get("replayed") is None
+    assert second.json()["replayed"] is True, "a tenant lost its own replay"
+    assert second.json()["result"] == first.json()["result"]
+    assert len(transport.calls) == 1, "the replay still burned a second GPU solve"
+
+
 def test_replay_is_tenant_scoped():
     """One tenant's cached solution must never answer another's call."""
     transport = _fake_transport([Response(200, _SOLVED), Response(200, {"reqId": "other"})])
