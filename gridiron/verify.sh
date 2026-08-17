@@ -30,7 +30,14 @@ PY="${PYTHON:-python3}"
 
 # --------------------------------------------------------------------------- #
 hdr "overlay tests — no GPU, no solver, no network"
-if "$PY" -m pytest gridiron/ -q -p no:cacheprovider >/tmp/cuopt-gate-tests.log 2>&1; then
+# BOTH overlay directories. This ran `pytest gridiron/` alone and reported "92
+# passed" as though that were the overlay, while gridiron-deploy/ held 14 tests
+# the gate never executed — among them the one asserting the cuOpt port is not
+# published on 0.0.0.0. Step 6 below already treats gridiron-deploy/ as overlay,
+# so the two halves of this script disagreed about what the overlay is; a gate
+# that tests a subset of what it claims to judge is the failure mode this whole
+# script exists to prevent.
+if "$PY" -m pytest gridiron/ gridiron-deploy/ -q -p no:cacheprovider >/tmp/cuopt-gate-tests.log 2>&1; then
   ok "$(grep -oE '[0-9]+ passed' /tmp/cuopt-gate-tests.log | tail -1)"
 else
   bad "overlay suite red"
