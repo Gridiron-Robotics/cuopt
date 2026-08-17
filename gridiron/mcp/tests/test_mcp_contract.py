@@ -13,7 +13,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gridiron.mcp.app import auth_mode, build_app
-from gridiron.mcp.client import CuoptClient, CuoptError, Response
+from gridiron.mcp.client import (
+    CuoptClient,
+    CuoptError,
+    CuoptRequestIdError,
+    Response,
+)
 from gridiron.mcp.tools import TOOLS, TOOLS_BY_NAME, ToolError, dispatch
 
 TOKEN = "test-token"
@@ -365,3 +370,138 @@ def test_lp_solution_without_vehicle_data_still_returns_the_raw_answer():
     out = dispatch("get_solve_result", {"request_id": "r"}, client=client)
     assert out["raw"]["response"]["solver_response"]["status"] == 0
     assert out["routing"]["assignments"] == []
+
+
+# --------------------------------------------------------------------------- #
+# request_id containment
+#
+# `request_id` is caller-controlled and lands in the URL path. httpx resolves
+# RFC-3986 dot segments after the string is built, so an unvalidated id escapes
+# /cuopt/ entirely: "../../admin/shutdown" addresses /admin/shutdown on the
+# solver host, reachable with GET via status/solution and with DELETE via
+# cancel_solve. These tests pin the guarantee at the client (the choke point),
+# at dispatch (the status code the agent sees), and through the live route.
+# --------------------------------------------------------------------------- #
+ESCAPING_IDS = [
+    "../../admin/shutdown",
+    "..",
+    "a/../../b",
+    "a/b",
+    "..%2f..%2fsecret",
+    "abc?validation_only=true",
+    "abc#frag",
+    "http://evil.invalid/x",
+    "id with spaces",
+    "café",
+    "\\..\\..\\x",
+]
+
+
+@pytest.mark.parametrize("rid", ESCAPING_IDS)
+@pytest.mark.parametrize("method", ["status", "solution", "cancel"])
+def test_request_id_that_would_leave_the_endpoint_path_is_refused(rid, method):
+    transport = _fake_transport([])
+    client = CuoptClient("http://solver:5000", transport=transport)
+    with pytest.raises(CuoptRequestIdError):
+        getattr(client, method)(rid)
+    # The decisive assertion: the request was never sent at all.
+    assert transport.calls == []
+
+
+def test_a_legitimate_uuid_request_id_still_passes():
+    transport = _fake_transport([Response(200, {}), Response(200, {}), Response(200, {})])
+    client = CuoptClient("http://solver:5000", transport=transport)
+    rid = "3f8b1c02-7d5e-4a19-9b6f-2c0e5a7d4188"
+    client.status(rid)
+    client.solution(rid)
+    client.cancel(rid)
+    assert [c["url"] for c in transport.calls] == [
+        f"http://solver:5000/cuopt/request/{rid}",
+        f"http://solver:5000/cuopt/solution/{rid}",
+        f"http://solver:5000/cuopt/request/{rid}",
+    ]
+
+
+def test_no_built_url_can_normalise_outside_the_cuopt_prefix():
+    """Belt and braces: whatever survives validation must still resolve under
+    /cuopt/ once httpx applies dot-segment removal."""
+    httpx = pytest.importorskip("httpx")
+    transport = _fake_transport([Response(200, {})] * 64)
+    client = CuoptClient("http://solver:5000", transport=transport)
+    for rid in ESCAPING_IDS + ["3f8b1c02-7d5e-4a19-9b6f-2c0e5a7d4188", "req-1"]:
+        for method in ("status", "solution", "cancel"):
+            try:
+                getattr(client, method)(rid)
+            except CuoptRequestIdError:
+                continue
+    for call in transport.calls:
+        assert str(httpx.URL(call["url"])).startswith("http://solver:5000/cuopt/")
+
+
+@pytest.mark.parametrize("tool", ["get_solve_status", "get_solve_result", "cancel_solve"])
+def test_path_escaping_request_id_is_400_not_500_and_never_reaches_the_solver(tool):
+    transport = _fake_transport([])
+    client = CuoptClient("http://solver:5000", transport=transport)
+    with pytest.raises(ToolError) as exc:
+        dispatch(tool, {"request_id": "../../admin/shutdown"}, client=client)
+    assert exc.value.status == 400
+    assert transport.calls == []
+
+
+def test_cancel_cannot_be_aimed_at_another_solver_endpoint_over_http():
+    """End-to-end through the authenticated route: the destructive tool is the
+    one that turns this bug into an arbitrary DELETE."""
+    transport = _fake_transport([])
+    client = CuoptClient("http://solver:5000", transport=transport)
+    resp = _app(client=client).post(
+        "/invoke",
+        json={"tool": "cancel_solve", "arguments": {"request_id": "../../admin/shutdown"}},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400
+    assert transport.calls == []
+
+
+def test_no_unauthenticated_route_exists_beyond_the_liveness_probe():
+    """WIRING, not helper behaviour: enumerate what the app actually serves with
+    no credential configured and assert nothing but HEAD / answers.
+
+    Disabling docs_url/redoc_url while leaving openapi_url at its default used to
+    leave /openapi.json returning the full path + schema list to anyone.
+    """
+    app = build_app(env={})  # fail-closed: no token, no insecure opt-in
+    client = TestClient(app)
+
+    def walk(routes, prefix=""):
+        found = []
+        for r in routes:
+            sub = getattr(r, "routes", None)
+            if sub:
+                found += walk(sub, prefix + (getattr(r, "path", "") or ""))
+                continue
+            path = prefix + getattr(r, "path", "")
+            for method in sorted((getattr(r, "methods", None) or set()) - {"OPTIONS"}):
+                found.append((method, path))
+        return found
+
+    open_routes = []
+    for method, path in walk(app.routes):
+        resp = client.request(method, path)
+        if resp.status_code < 400 and not (method == "HEAD" and path == "/"):
+            open_routes.append((method, path, resp.status_code))
+    assert open_routes == [], f"unauthenticated routes served: {open_routes}"
+
+
+def test_openapi_schema_is_not_served_to_an_unauthenticated_caller():
+    resp = TestClient(build_app(env={})).get("/openapi.json")
+    assert resp.status_code == 404, (
+        "the OpenAPI document enumerates /tools and /invoke; a fail-closed "
+        "solver surface must not hand it out unauthenticated"
+    )
+
+
+def test_the_authenticated_tool_routes_still_work():
+    """Guard against 'fixing' the above by breaking discovery."""
+    client = _app()
+    assert client.get("/tools", headers=AUTH).status_code == 200
+    assert client.head("/").status_code == 200

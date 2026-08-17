@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from gridiron.mcp.client import CuoptClient, CuoptError
+from gridiron.mcp.client import CuoptClient, CuoptError, CuoptRequestIdError
 from gridiron.mcp.fleet_assignment import (
     AssignmentError,
     decode_assignment,
@@ -216,8 +216,9 @@ def dispatch(tool: str, arguments: dict[str, Any], *, client: CuoptClient) -> An
         return _dispatch(tool, arguments, client)
     except ToolError:
         raise
-    except AssignmentError as exc:
-        # The caller's model is wrong (bad index, missing capacity side). Their
+    except (AssignmentError, CuoptRequestIdError) as exc:
+        # The caller's model is wrong (bad index, missing capacity side), or the
+        # request_id would not stay inside the solver's documented path. Their
         # fix, not ours, so it is a 400 and stays at warning level.
         _log.warning("cuopt tool %s rejected: %s", tool, exc)
         raise ToolError(400, str(exc)) from exc

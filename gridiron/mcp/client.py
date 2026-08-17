@@ -41,6 +41,53 @@ class CuoptError(RuntimeError):
         self.status = status
 
 
+class CuoptRequestIdError(ValueError):
+    """A request id that would not stay inside the documented endpoint path."""
+
+
+# cuOpt reqIds are server-minted UUIDs. Anything outside this set is refused
+# rather than escaped, because the failure is not cosmetic: `request_id` is
+# interpolated into the URL path below, and httpx resolves RFC-3986 dot
+# segments *after* we build the string. A caller-supplied id of
+# "../../admin/shutdown" turns `/cuopt/request/<id>` into `/admin/shutdown` on
+# the solver host — reachable with GET (status/solution) and, via cancel(),
+# with DELETE. A "?" or "#" likewise splices a query/fragment onto a path we
+# thought we controlled. The MCP bearer token authenticates the caller; it does
+# not entitle them to address arbitrary solver endpoints.
+_REQUEST_ID_OK = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+MAX_REQUEST_ID_LEN = 200
+
+
+def validate_request_id(request_id: Any) -> str:
+    """Return ``request_id`` if it is a safe single path segment, else raise.
+
+    Allow-list, not deny-list: every rejected form we could enumerate (``..``,
+    ``%2f``, ``?``, ``#``, an absolute URL) is a symptom of the same bug, and a
+    deny-list would keep growing.
+    """
+    if not isinstance(request_id, str):
+        raise CuoptRequestIdError(
+            f"request_id must be a string, got {type(request_id).__name__}"
+        )
+    rid = request_id.strip()
+    if not rid:
+        raise CuoptRequestIdError("request_id must not be empty")
+    if len(rid) > MAX_REQUEST_ID_LEN:
+        raise CuoptRequestIdError(
+            f"request_id is {len(rid)} chars; the maximum is {MAX_REQUEST_ID_LEN}"
+        )
+    bad = sorted(set(rid) - _REQUEST_ID_OK)
+    if bad:
+        raise CuoptRequestIdError(
+            f"request_id {rid!r} contains characters that are not allowed in a "
+            f"solver request id ({''.join(bad)!r}); it must match [A-Za-z0-9_-]. "
+            "A cuOpt reqId is a UUID."
+        )
+    return rid
+
+
 @dataclass(frozen=True)
 class Response:
     status: int
@@ -117,14 +164,16 @@ class CuoptClient:
         query = f"?{'&'.join(params)}" if params else ""
         return self._call("POST", "/cuopt/request", body=problem, query=query)
 
+    # Every id-bearing call validates here rather than at the MCP boundary, so a
+    # future caller that uses this client directly cannot reintroduce the hole.
     def status(self, request_id: str) -> Any:
-        return self._call("GET", f"/cuopt/request/{request_id}")
+        return self._call("GET", f"/cuopt/request/{validate_request_id(request_id)}")
 
     def solution(self, request_id: str) -> Any:
-        return self._call("GET", f"/cuopt/solution/{request_id}")
+        return self._call("GET", f"/cuopt/solution/{validate_request_id(request_id)}")
 
     def cancel(self, request_id: str) -> Any:
-        return self._call("DELETE", f"/cuopt/request/{request_id}")
+        return self._call("DELETE", f"/cuopt/request/{validate_request_id(request_id)}")
 
     def health(self) -> Any:
         return self._call("GET", "/cuopt/health")
@@ -135,4 +184,13 @@ def _short(body: Any, limit: int = 300) -> str:
     return text[:limit]
 
 
-__all__ = ["CuoptClient", "CuoptError", "Response", "Transport", "DEFAULT_BASE_URL"]
+__all__ = [
+    "CuoptClient",
+    "CuoptError",
+    "CuoptRequestIdError",
+    "Response",
+    "Transport",
+    "DEFAULT_BASE_URL",
+    "MAX_REQUEST_ID_LEN",
+    "validate_request_id",
+]

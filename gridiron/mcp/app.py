@@ -16,6 +16,17 @@ Auth is **fail-closed**: with neither ``CUOPT_MCP_TOKEN`` set nor
 serve. An unauthenticated tool surface on a solver is not merely a data-exposure
 problem — it is free GPU time for anyone who can reach the port. ``HEAD /`` stays
 open so a gateway can probe liveness either way.
+
+**What ``X-Tenant-Id`` does and does not do.** It scopes the idempotency replay
+cache, and nothing else. It is *not* an authorization boundary: the bearer token
+is a single shared service credential, and upstream cuOpt has no notion of an
+owner for a ``reqId``. Any caller holding the token who learns or guesses a
+request id can therefore poll its result or ``cancel_solve`` it, whatever tenant
+submitted it. Do not read the header as isolation. Closing that gap needs an
+owner map (tenant -> reqId, recorded at submit and checked on every id-bearing
+tool) held here, because upstream will not supply one — tracked as estate work,
+not solved in this overlay. Until then the token is a single-trust-domain
+credential and must be issued per deployment, not per tenant.
 """
 
 from __future__ import annotations
@@ -192,7 +203,20 @@ def _error(status: int, message: str, *, tool: str | None = None) -> JSONRespons
 def build_app(**kwargs: Any) -> FastAPI:
     """Standalone sidecar app. Wires the self-heal drop-in so a solver fault that
     surfaces here reaches OpenObserve on the same ``cuopt`` stream."""
-    app = FastAPI(title="cuOpt MCP (Gridiron)", docs_url=None, redoc_url=None)
+    # openapi_url=None alongside docs_url/redoc_url. Disabling only the two docs
+    # UIs left /openapi.json serving the same information to anyone: an
+    # unauthenticated GET returned the full schema — every path (/tools,
+    # /invoke) and every request shape — from a service whose entire posture is
+    # "refuse to serve tools without a credential". Handing an attacker the tool
+    # catalog's shape for free contradicts that, so the generated schema route
+    # goes too. Contract-A discovery is `GET /tools`, which is authenticated;
+    # nothing in the estate consumes this app's OpenAPI document.
+    app = FastAPI(
+        title="cuOpt MCP (Gridiron)",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.include_router(build_mcp_router(**kwargs))
 
     try:
