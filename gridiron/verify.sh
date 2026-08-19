@@ -210,6 +210,22 @@ wp_content_illegal() {
   printf '%s\n' "$src" |
     grep -nE '^[[:space:]]*(secrets|privileged|volumes|entrypoint|detach|backend_options|environment):' |
     sed 's/^/   forbidden key: /'
+  # `volumes:` is NOT blanket-forbidden: 16 of these gates stand up throwaway
+  # databases and brokers, which needs the host daemon, and a rule that breaks
+  # every one of them would just get waived. It is checked by content instead,
+  # and the allowance is exactly one path. The cost is stated rather than
+  # glossed: a writable /var/run/docker.sock is root on the runner. It is
+  # granted because the gate genuinely needs it — which is exactly why a SECOND
+  # mount, or a different one, is refused here.
+  printf '%s\n' "$src" | grep -qE '^[[:space:]]*volumes:[[:space:]]*[^[:space:]]' &&
+    echo "   volumes: must be a block list, one mount per line, so each is auditable"
+  printf '%s\n' "$src" | awk '
+      /^[[:space:]]*volumes:[[:space:]]*$/ { inb = 1; next }
+      inb && /^[[:space:]]*-[[:space:]]/   { print; next }
+      inb && NF                            { inb = 0 }
+    ' | sed 's/^[[:space:]]*-[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' |
+    grep -vxF '/var/run/docker.sock:/var/run/docker.sock' |
+    sed 's|^|   volume mount beyond the docker socket: |'
   # An inline list (`commands: [a, b]`) hides its entries from the line-wise
   # audit below, so the block form is required rather than parsed.
   printf '%s\n' "$src" | grep -qE '^[[:space:]]*commands:[[:space:]]*[^[:space:]]' &&
