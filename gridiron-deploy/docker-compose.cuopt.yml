@@ -22,7 +22,18 @@ services:
     runtime: nvidia
     command: python -m cuopt_server.cuopt_service -p 5000
     ports:
-      - "5000:5000"
+      # Loopback-only, deliberately. Upstream cuOpt ships NO authentication of
+      # any kind: every /cuopt/* endpoint — submit, poll, and DELETE — is open
+      # to whoever reaches the port. A bare "5000:5000" publishes that on all
+      # interfaces, which on any non-isolated host means unmetered GPU time for
+      # strangers and a one-request DELETE of another user's solve. The Gridiron
+      # MCP overlay's fail-closed bearer auth guards the *tool surface*, not this
+      # port, so the port itself has to be the thing that is closed.
+      # The estate services in the header comment all connect over loopback.
+      # To expose it beyond the host, front it with the gateway (or the Helm
+      # chart, whose Service is ClusterIP and whose Ingress is off by default) —
+      # do not widen this line.
+      - "127.0.0.1:5000:5000"
     environment:
       # NVIDIA GPU configuration
       - NVIDIA_VISIBLE_DEVICES=all

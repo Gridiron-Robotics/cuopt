@@ -125,8 +125,27 @@ class TestDockerComposeCuopt:
     def test_cuopt_service_port(self):
         compose = self._compose()
         ports = compose["services"]["cuopt"]["ports"]
-        # docker-compose short syntax entries are strings like "5000:5000".
-        assert any(str(p) == "5000:5000" for p in ports), f"expected 5000:5000 mapping, got {ports}"
+        # docker-compose short syntax entries look like "127.0.0.1:5000:5000".
+        # Still the documented 5000 inside the container, reached on host 5000.
+        assert any(
+            str(p).endswith("5000:5000") for p in ports
+        ), f"expected a host->container 5000 mapping, got {ports}"
+
+    def test_cuopt_port_is_published_to_loopback_only(self):
+        """Upstream cuOpt has no auth: submit, poll and DELETE are all open to
+        anyone who reaches the port. Publishing it on 0.0.0.0 hands strangers
+        unmetered GPU time and the ability to delete another user's solve, so
+        the host binding is the control and it must stay explicit."""
+        compose = self._compose()
+        ports = compose["services"]["cuopt"]["ports"]
+        assert ports, "cuopt service publishes no ports at all"
+        for p in ports:
+            entry = str(p)
+            assert entry.startswith(("127.0.0.1:", "localhost:")), (
+                f"cuopt port {entry!r} is published on all interfaces; an "
+                "unauthenticated GPU solver must bind to loopback and be "
+                "fronted by the gateway"
+            )
 
     def test_cuopt_service_has_healthcheck(self):
         compose = self._compose()
