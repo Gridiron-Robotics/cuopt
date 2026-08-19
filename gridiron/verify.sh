@@ -193,6 +193,42 @@ hdr "upstream is untouched"
 # can fail, and a missing base degrades the history half explicitly instead of
 # being laundered into the pass count.
 
+# `.woodpecker/gate.yaml` is the CI pipeline that RUNS this script. It has to
+# live at that path — Woodpecker only reads `.woodpecker/` — so it cannot move
+# inside the overlay. Waiving it BY PATH would be the wrong trade: a `commands:`
+# entry in a Woodpecker step is arbitrary code executing with the runner's
+# credentials, so a path waiver hands out exactly the capability this step
+# exists to withhold. The waiver is therefore on the CONTENT — the file may
+# exist, and the only thing it may do is invoke this repo's own judge.
+#
+# Any OTHER file under .woodpecker/ is a second pipeline this never read, so it
+# is deliberately NOT filtered out below and fails the step on its own.
+WP_FILE=".woodpecker/gate.yaml"
+wp_content_illegal() {
+  [ -f "$WP_FILE" ] || { echo "   $WP_FILE is listed as changed but does not exist"; return; }
+  src="$(sed 's/#.*//' "$WP_FILE")"
+  printf '%s\n' "$src" |
+    grep -nE '^[[:space:]]*(secrets|privileged|volumes|entrypoint|detach|backend_options|environment):' |
+    sed 's/^/   forbidden key: /'
+  # An inline list (`commands: [a, b]`) hides its entries from the line-wise
+  # audit below, so the block form is required rather than parsed.
+  printf '%s\n' "$src" | grep -qE '^[[:space:]]*commands:[[:space:]]*[^[:space:]]' &&
+    echo "   commands: must be a block list, one command per line, so each is auditable"
+  cmds="$(printf '%s\n' "$src" | awk '
+      /^[[:space:]]*commands:[[:space:]]*$/ { inb = 1; next }
+      inb && /^[[:space:]]*-[[:space:]]/    { print; next }
+      inb && NF                             { inb = 0 }
+    ' | sed 's/^[[:space:]]*-[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)"
+  if [ -z "$cmds" ]; then
+    echo "   no command found — a pipeline that runs nothing reports green having judged nothing"
+  else
+    printf '%s\n' "$cmds" | grep -vxF './gridiron/verify.sh' |
+      sed 's|^|   command that is not ./gridiron/verify.sh: |'
+  fi
+  return 0
+}
+wp_note=""
+
 # --- half 1: the working tree. Always runnable, no base required. ----------- #
 # This is also the half that matters most in practice: it is what stands between
 # an upstream edit and a commit.
@@ -203,11 +239,18 @@ pending="$(
     git ls-files --others --exclude-standard
   } | sort -u | grep -Ev '^(gridiron|gridiron-deploy)/' || true
 )"
-if [ -z "$pending" ]; then
-  ok "working tree clean outside the overlay (gridiron/, gridiron-deploy/)"
-else
+wp_pending="$(printf '%s\n' "$pending" | grep -xF "$WP_FILE" || true)"
+pending="$(printf '%s\n' "$pending" | grep -vxF "$WP_FILE" | grep -v '^$' || true)"
+wp_bad="$([ -n "$wp_pending" ] && wp_content_illegal || true)"
+if [ -n "$wp_pending" ]; then wp_note=", plus $WP_FILE (runs ./gridiron/verify.sh and nothing else)"; fi
+if [ -n "$pending" ]; then
   echo "$pending" | sed 's/^/   /'
   bad "upstream files modified — this fork must stay rebaseable"
+elif [ -n "$wp_bad" ]; then
+  echo "$wp_bad" | head -20
+  bad "$WP_FILE does more than invoke this repo's own gate"
+else
+  ok "working tree clean outside the overlay (gridiron/, gridiron-deploy/)$wp_note"
 fi
 
 # --- half 2: committed history, when a base can be resolved. ---------------- #
@@ -222,11 +265,19 @@ if [ -z "$base" ]; then
   echo "     clone (shallow/squashed). Only the working tree was checked."
 else
   hist="$(git diff --name-only "$base"..HEAD | grep -Ev '^(gridiron|gridiron-deploy)/' || true)"
-  if [ -z "$hist" ]; then
-    ok "no committed changes outside the overlay since $(git rev-parse --short "$base")"
-  else
+  wp_hist="$(printf '%s\n' "$hist" | grep -xF "$WP_FILE" || true)"
+  hist="$(printf '%s\n' "$hist" | grep -vxF "$WP_FILE" | grep -v '^$' || true)"
+  # Committed-but-unmodified is still content-checked: the file that ships is
+  # the file CI executes, whichever commit introduced it.
+  wp_bad2="$([ -n "$wp_hist" ] && wp_content_illegal || true)"
+  if [ -n "$hist" ]; then
     echo "$hist" | sed 's/^/   /'
     bad "upstream files modified in committed history"
+  elif [ -n "$wp_bad2" ]; then
+    echo "$wp_bad2" | head -20
+    bad "$WP_FILE does more than invoke this repo's own gate"
+  else
+    ok "no committed changes outside the overlay since $(git rev-parse --short "$base")$([ -n "$wp_hist" ] && echo ", plus $WP_FILE (runs ./gridiron/verify.sh and nothing else)")"
   fi
 fi
 
