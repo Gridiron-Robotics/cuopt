@@ -17,16 +17,24 @@ serve. An unauthenticated tool surface on a solver is not merely a data-exposure
 problem — it is free GPU time for anyone who can reach the port. ``HEAD /`` stays
 open so a gateway can probe liveness either way.
 
-**What ``X-Tenant-Id`` does and does not do.** It scopes the idempotency replay
-cache, and nothing else. It is *not* an authorization boundary: the bearer token
-is a single shared service credential, and upstream cuOpt has no notion of an
-owner for a ``reqId``. Any caller holding the token who learns or guesses a
-request id can therefore poll its result or ``cancel_solve`` it, whatever tenant
-submitted it. Do not read the header as isolation. Closing that gap needs an
-owner map (tenant -> reqId, recorded at submit and checked on every id-bearing
-tool) held here, because upstream will not supply one — tracked as estate work,
-not solved in this overlay. Until then the token is a single-trust-domain
-credential and must be issued per deployment, not per tenant.
+**What ``X-Tenant-Id`` does, and what it is worth.** It is half of the caller's
+*principal* — ``(sha256(bearer)[:16], X-Tenant-Id)`` — which scopes the
+idempotency replay cache and owns the solves it creates. Upstream cuOpt attaches
+no owner to a ``reqId``, so the owner map lives here
+(:mod:`gridiron.mcp.ownership`): the principal is recorded when a solve is
+created and checked before ``get_solve_status`` / ``get_solve_result`` /
+``cancel_solve`` touch the solver.
+
+Enforcement is gated on ``CUOPT_MCP_ENFORCE_REQUEST_OWNER``, default **off**, and
+the reason is stated rather than glossed: the tenant half of the principal is
+caller-asserted, so with one shared bearer token the check contains accidents (an
+agent or gateway carrying a ``reqId`` across tenant contexts, a destructive
+cross-tenant ``cancel_solve``) but not a hostile holder of that token, who can
+simply assert the victim's tenant. It becomes a real authorization boundary only
+once the estate issues a credential per tenant — at which point the
+authenticated half becomes distinct and no code here changes. See
+:mod:`gridiron.mcp.ownership` for the two preconditions (single worker or shared
+store; registry capacity) before turning the flag on.
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from fastapi import APIRouter, FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse
 
 from gridiron.mcp.client import CuoptClient
+from gridiron.mcp import ownership
 from gridiron.mcp.tools import SERVER_NAME, TOOLS, ToolError, dispatch
 
 _log = logging.getLogger("gridiron.mcp.cuopt")
@@ -85,7 +94,11 @@ def _check_bearer(authorization: str | None, env: dict[str, str]) -> tuple[bool,
 
 
 class _ReplayCache:
-    """Tenant-scoped (tool, Idempotency-Key) -> result, bounded LRU.
+    """Principal-scoped (tool, Idempotency-Key) -> result, bounded LRU.
+
+    The first element of the key is the caller principal from
+    :func:`gridiron.mcp.ownership.principal` — the bearer's fingerprint AND the
+    asserted tenant, not the tenant alone.
 
     In-process, and therefore per-worker: a retry that lands on another worker
     re-solves. That is a cost, not a correctness problem, because every cuOpt tool
@@ -116,10 +129,12 @@ def build_mcp_router(
     client: CuoptClient | None = None,
     env: dict[str, str] | None = None,
     replay: _ReplayCache | None = None,
+    owners: ownership.OwnerRegistry | None = None,
 ) -> APIRouter:
     """The Contract-A router. ``client``/``env`` injected for tests."""
     router = APIRouter(tags=["mcp"])
     cache = replay if replay is not None else _ReplayCache()
+    owner_registry = owners if owners is not None else ownership.OwnerRegistry()
 
     def _env() -> dict[str, str]:
         return env if env is not None else dict(os.environ)
@@ -174,10 +189,37 @@ def build_mcp_router(
         if not isinstance(arguments, dict):
             return _error(400, "'arguments' must be an object")
 
-        tenant = (x_tenant_id or "").strip() or "-"
+        # The caller's identity: the authenticated bearer's fingerprint plus the
+        # asserted tenant. It scopes the replay cache AND owns the solves this
+        # call creates, so the two can never disagree about who a caller is —
+        # keying replay on the tenant alone let two different credentials
+        # asserting one tenant share cached results, including a request_id
+        # only one of them would then be allowed to poll.
+        owner = ownership.principal(authorization, x_tenant_id)
+        enforce_owner = ownership.enforcing(_env())
+
+        # BEFORE the replay shortcut and BEFORE dispatch, in that order and for
+        # two different reasons. Before dispatch because cancel_solve is
+        # destructive: a check that runs after the handler has already deleted
+        # another caller's request refuses nothing. Before the replay lookup
+        # because an early return on a cached result is an authorization
+        # shortcut — a request the caller is not entitled to make must not be
+        # answered 200 just because an entry happens to sit under its
+        # (principal, tool, Idempotency-Key).
+        denied = ownership.refusal(
+            tool, arguments, owner, owner_registry, enabled=enforce_owner
+        )
+        if denied is not None:
+            _log.warning("cuopt %s refused: request not owned by caller", tool)
+            return _error(403, denied, tool=tool)
+
         if idempotency_key:
-            hit = cache.get((tenant, tool, idempotency_key))
+            hit = cache.get((owner, tool, idempotency_key))
             if hit is not None:
+                # Re-record: the replay cache and the owner registry evict
+                # independently, and a replayed request_id whose ownership had
+                # aged out would be unpollable by the caller that just got it.
+                ownership.record_result(tool, hit, owner, owner_registry)
                 return JSONResponse({"tool": tool, "result": hit, "replayed": True})
 
         try:
@@ -185,8 +227,12 @@ def build_mcp_router(
         except ToolError as exc:
             return _error(exc.status, exc.message, tool=tool)
 
+        # Recorded unconditionally, not only when enforcing, so switching the
+        # flag on does not start from an empty map and 403 live traffic.
+        ownership.record_result(tool, result, owner, owner_registry)
+
         if idempotency_key:
-            cache.put((tenant, tool, idempotency_key), result)
+            cache.put((owner, tool, idempotency_key), result)
         return JSONResponse({"tool": tool, "result": result})
 
     return router
